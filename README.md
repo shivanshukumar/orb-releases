@@ -74,13 +74,16 @@ You should see "Logged in to github.com."
 
 ### 3. Install Orb
 
-- **macOS:** Open the `.dmg`, drag Orb to Applications, launch from Applications.
-  
-  **Required:** Orb is not notarized by Apple. macOS **will block the app** on first launch. Run this after installing:
+- **macOS:** Open the `.dmg`, drag Orb to Applications.
+
+  > **⚠️ macOS will block the app on first launch.** Orb is not notarized by Apple. You'll see this warning — it does NOT mean the app is damaged. This is normal for open-source apps distributed outside the Mac App Store.
+
+  <p align="center"><img src="docs/macos-gatekeeper-warning.png" width="400" alt="macOS Gatekeeper warning: Orb.app is damaged and can't be opened"></p>
+
+  **Click Cancel**, then run this one-time command to allow Orb to launch:
   ```bash
   xattr -dr com.apple.quarantine '/Applications/Orb.app'
   ```
-  This is a one-time step.
 
 - **Linux:** Install the `.deb` with `sudo dpkg -i orb_*.deb`, or run the `.AppImage` directly.
 
@@ -231,10 +234,11 @@ Initial release.
 - Open Settings and check the GitHub CLI status section
 - Click "Try Again" after fixing the issue
 
-**"Unidentified developer" on macOS**
+**"Orb.app is damaged" / "Unidentified developer" on macOS**
 ```bash
 xattr -dr com.apple.quarantine '/Applications/Orb.app'
 ```
+See [Install step 3](#3-install-orb) for details.
 
 **No PRs showing up**
 - Make sure you have open PRs or recent review requests on GitHub
