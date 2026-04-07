@@ -95,6 +95,18 @@ On first launch, Orb will poll GitHub and populate your PR list. This takes a fe
 
 ---
 
+## Software updates
+
+Orb checks for updates automatically — once on startup and every hour afterward. When a new version is available:
+
+- **Popup**: a green banner appears at the top with an "Update" button
+- **Settings → General**: shows current version, update status, and an "Update & restart" button
+- **Headless mode**: an `update_available` event is emitted via JSONL and Unix socket
+
+Clicking "Update & restart" downloads the correct binary for your platform, installs it, and relaunches Orb. On macOS this downloads the DMG, mounts it, copies the `.app` to `/Applications`, and strips the quarantine flag. On Linux it replaces the AppImage in place.
+
+---
+
 ## What you get
 
 **The popup** — click the tray icon to see all your PRs organized by what needs your attention. Each PR shows CI status, review state, author avatar, and age. Sections are collapsible and reorderable. Right-click any PR for quick actions: approve, merge (with strategy picker), request changes, or copy link.
@@ -113,7 +125,7 @@ On first launch, Orb will poll GitHub and populate your PR list. This takes a fe
 
 **Events for AI agents** — Orb emits structured events (JSONL log, Unix socket, shell hooks) on every PR state change. Wire up your AI agents to respond automatically. See the [agent integration guide](#agent-integration) below.
 
-**Settings** — poll interval, notification preferences, section visibility and order, badge configuration, event hooks, repo filtering. All accessible from the gear icon.
+**Settings** — poll interval, notification preferences, section visibility and order, badge configuration, event hooks, repo filtering, software updates. All accessible from the gear icon.
 
 ---
 
@@ -121,13 +133,13 @@ On first launch, Orb will poll GitHub and populate your PR list. This takes a fe
 
 Orb fires events whenever a PR changes state. You can consume them three ways:
 
-**Shell hooks** — configure commands in Settings that run when specific events fire:
+**Shell hooks** — configure commands in Settings that run when specific events fire. Each hook receives `$ORB_EVENT` (event type) and `$ORB_EVENT_JSON` (path to the full event payload). Use `jq` to extract any field:
 
 ```json
 {
-  "on_ci_status_change": "cd ~/code/$ORB_REPO && claude -p 'CI failed on PR #$ORB_PR_NUMBER. Fix it.'",
-  "on_pr_approved": "gh pr merge $ORB_PR_NUMBER --squash --auto --repo $ORB_REPO",
-  "on_new_pr": "claude -p 'Do a first-pass review of PR #$ORB_PR_NUMBER in $ORB_REPO'"
+  "on_ci_status_change": "cd ~/code/$(jq -r '.data.pr.repo_name' \"$ORB_EVENT_JSON\") && claude -p \"CI failed on PR #$(jq -r '.data.pr.number' \"$ORB_EVENT_JSON\"). Fix it.\"",
+  "on_pr_approved": "gh pr merge $(jq -r '.data.pr.number' \"$ORB_EVENT_JSON\") --squash --auto --repo $(jq -r '.data.pr.repo' \"$ORB_EVENT_JSON\")",
+  "on_new_pr": "cat \"$ORB_EVENT_JSON\" | claude -p 'Do a first-pass review of this PR'"
 }
 ```
 
@@ -139,7 +151,6 @@ tail -f ~/Library/Application\ Support/orb/events.jsonl | jq 'select(.event == "
 
 # Linux
 tail -f ~/.local/share/orb/events.jsonl | jq 'select(.event == "bucket_change")'
-
 ```
 
 **Unix socket** (macOS/Linux) — real-time streaming with optional event filtering:
@@ -180,20 +191,56 @@ echo '{"subscribe": {"events": ["pr_approved", "ci_status_change"]}}' \
 | `pr_approved` | `bucket_change` where new section is Approved |
 | `pr_merged` | `bucket_change` where new section is Recently Merged |
 | `attention_needed` | Summary of all PRs needing your action |
+| `update_available` | A new version of Orb is available (includes current/latest version and release URL) |
 
-### Hook environment variables
+### Hook interface
+
+Every hook receives exactly two environment variables:
 
 | Variable | Description |
 |---|---|
-| `ORB_EVENT` | Event name |
-| `ORB_PR_NUMBER` | PR number |
-| `ORB_PR_TITLE` | PR title |
-| `ORB_PR_URL` | PR URL |
-| `ORB_REPO` | Repository (owner/name) |
-| `ORB_PR_AUTHOR` | PR author |
-| `ORB_HEAD_REF` | Source branch |
-| `ORB_BUCKET` | Current section ID |
-| `ORB_EVENT_JSON` | Path to full event payload (use with `jq`) |
+| `ORB_EVENT` | Event type for quick filtering (e.g. `bucket_change`, `new_pr`) |
+| `ORB_EVENT_JSON` | Path to a temp JSON file containing the complete event payload |
+
+All event data lives in the JSON file. Extract any field with `jq`:
+
+```bash
+jq -r '.data.pr.title' "$ORB_EVENT_JSON"     # PR title
+jq -r '.data.pr.number' "$ORB_EVENT_JSON"     # PR number
+jq -r '.data.pr.repo' "$ORB_EVENT_JSON"       # Repository (owner/name)
+jq -r '.data.pr.url' "$ORB_EVENT_JSON"        # Full GitHub URL
+jq -r '.data.pr.author' "$ORB_EVENT_JSON"     # PR author
+jq -r '.data.pr.bucket' "$ORB_EVENT_JSON"     # Current section
+jq -r '.data.trigger' "$ORB_EVENT_JSON"       # What triggered the event
+```
+
+This design is intentional — all data flows through the JSON, so the interface is extensible (new fields appear without env var changes) and safe (no shell injection risk from attacker-controlled PR titles or branch names).
+
+### Event envelope
+
+Every event has a consistent top-level structure:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "evt_68234abc_1f3a",
+  "event": "bucket_change",
+  "version": 1,
+  "timestamp": "2026-04-06T12:00:00Z",
+  "viewer": "your-github-username",
+  "data": { ... }
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `schema_version` | Format version — bump signals breaking changes to the envelope shape |
+| `event_id` | Unique per event instance — use for deduplication if replaying or reconnecting |
+| `event` | Event type (matches hook names) |
+| `version` | Per-event-type version — bump signals changes to that event's `data` shape |
+| `timestamp` | ISO 8601 UTC |
+| `viewer` | Your GitHub username |
+| `data` | Event-specific payload |
 
 ---
 
@@ -201,6 +248,7 @@ echo '{"subscribe": {"events": ["pr_approved", "ci_status_change"]}}' \
 
 | Setting | Default | Description |
 |---|---|---|
+| Software updates | Check + install | Checks hourly and on startup; one-click update & restart |
 | Poll interval | 45 seconds | How often Orb checks GitHub (minimum 15s) |
 | Merged PR window | 7 days | How far back to show recently merged PRs |
 | Max PR age | No limit | Hide PRs older than N days |
@@ -213,6 +261,13 @@ echo '{"subscribe": {"events": ["pr_approved", "ci_status_change"]}}' \
 ---
 
 ## Changelog
+
+### v0.1.1
+
+- **Auto-update**: checks for updates on startup and hourly; one-click "Update & restart" in popup and settings
+- **Event schema hardening**: `schema_version` and unique `event_id` on every event for forward compatibility and deduplication
+- **Secure hook interface**: hooks receive only `ORB_EVENT` and `ORB_EVENT_JSON` — all data accessed via `jq`, eliminating shell injection risk from attacker-controlled PR metadata
+- **`update_available` event**: headless consumers are notified when a new version is available
 
 ### v0.1.0
 
